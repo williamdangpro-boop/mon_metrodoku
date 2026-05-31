@@ -1,62 +1,73 @@
 import streamlit as st
+from streamlit_gsheets import GSheetsConnection
 import pandas as pd
-import os
-
-# Nom du fichier où seront stockés les scores
-DB_FILE = "scores_metrodoku.csv"
+import re
 
 st.set_page_config(page_title="Metrodoku Clan", page_icon="🚇")
-st.title("🏆 Championnat Metrodoku")
+st.title("🏆 Championnat Metrodoku (Google Sheets)")
 
-# --- FONCTIONS DE GESTION DES DONNÉES ---
+# 🔗 COPIE LE LIEN DE TON GOOGLE SHEET ICI
+URL_DU_SHEET = https://docs.google.com/spreadsheets/d/1p7uGUSLNS-C4iVgSFHSWc-75-yEwr1xvoCkl-4yI0Lg/edit?usp=sharing
+
+# Connexion automatique au Google Sheet
+conn = st.connection("gsheets", type=GSheetsConnection)
 
 def charger_donnees():
-    """Charge les scores depuis le fichier CSV ou crée un tableau vide."""
-    if os.path.exists(DB_FILE):
-        return pd.read_csv(DB_FILE)
-    return pd.DataFrame(columns=["Joueur", "Score_Total"])
+    """Lit les données en direct depuis Google Sheets."""
+    # On force le rafraîchissement (ttl=0) pour avoir les vrais scores à chaque seconde
+    return conn.read(spreadsheet=URL_DU_SHEET, ttl=0)
 
 def sauvegarder_donnees(df):
-    """Enregistre le tableau dans le fichier CSV."""
-    df.to_csv(DB_FILE, index=False)
+    """Met à jour le Google Sheet avec le nouveau tableau."""
+    # GSheetsConnection permet d'écrire directement dans le tableau
+    conn.update(spreadsheet=URL_DU_SHEET, data=df)
 
-# --- LOGIQUE PRINCIPALE ---
+def extraire_score_du_texte(texte):
+    match = re.search(r"(\d+)\s*/\s*900", texte)
+    if match: return int(match.group(1))
+    return None
 
-df_scores = charger_donnees()
+# --- CHARGEMENT ---
+try:
+    df_scores = charger_donnees()
+except Exception:
+    st.error("Impossible de se connecter au Google Sheet. Vérifie le lien et le partage public.")
+    df_scores = pd.DataFrame(columns=["Joueur", "Score_Total"])
 
-# Formulaire dans la barre latérale
-st.sidebar.header("Enregistrer le score du jour")
-with st.sidebar.form("form_score"):
-    nom = st.text_input("Prénom du joueur").strip().capitalize()
-    score_du_jour = st.number_input("Score obtenu aujourd'hui", min_value=0, max_value=900)
-    valider = st.form_submit_button("Ajouter les points")
+# --- INTERFACE DE SAISIE ---
+st.sidebar.header("Enregistrer un résultat")
+with st.sidebar.form("form_metrodoku"):
+    nom = st.text_input("Ton Prénom").strip().capitalize()
+    texte_partage = st.text_area("Colle ton partage Metrodoku ici")
+    valider = st.form_submit_button("Ajouter au classement")
 
 if valider and nom:
-    # Si le joueur existe déjà, on additionne
-    if nom in df_scores["Joueur"].values:
-        index = df_scores.index[df_scores["Joueur"] == nom][0]
-        df_scores.at[index, "Score_Total"] += score_du_jour
-    # Sinon, on crée le joueur
-    else:
-        nouvel_utilisateur = pd.DataFrame({"Joueur": [nom], "Score_Total": [score_du_jour]})
-        df_scores = pd.concat([df_scores, nouvel_utilisateur], ignore_index=True)
+    score_detecte = extraire_score_du_texte(texte_partage)
     
-    sauvegarder_donnees(df_scores)
-    st.sidebar.success(f"Points ajoutés pour {nom} !")
-    st.rerun() # Rafraîchit la page pour voir le changement
+    if score_detecte is not None:
+        # Si le joueur existe déjà
+        if nom in df_scores["Joueur"].values:
+            idx = df_scores.index[df_scores["Joueur"] == nom][0]
+            # Attention, on s'assure que le score actuel est bien traité comme un nombre
+            df_scores.at[idx, "Score_Total"] = int(df_scores.at[idx, "Score_Total"]) + score_detecte
+        else:
+            nouveau = pd.DataFrame({"Joueur": [nom], "Score_Total": [score_detecte]})
+            df_scores = pd.concat([df_scores, nouveau], ignore_index=True)
+        
+        # Envoi immédiat vers Google Sheets !
+        sauvegarder_donnees(df_scores)
+        st.sidebar.success(f"Score ajouté pour {nom} !")
+        st.rerun()
+    else:
+        st.sidebar.error("Score introuvable dans le texte.")
 
 # --- AFFICHAGE ---
-
 st.header("📊 Classement Général")
 
 if not df_scores.empty:
-    # On trie pour avoir le premier en haut
+    # On s'assure que la colonne des scores contient des nombres pour bien trier
+    df_scores["Score_Total"] = pd.to_numeric(df_scores["Score_Total"])
     df_sorted = df_scores.sort_values(by="Score_Total", ascending=False).reset_index(drop=True)
-    
-    # On affiche un beau tableau
-    st.dataframe(df_sorted, use_container_width=True)
-    
-    # Petit bonus : un graphique pour voir qui domine
-    st.bar_chart(data=df_sorted, x="Joueur", y="Score_Total")
+    st.table(df_sorted)
 else:
-    st.info("Aucun score enregistré. Commencez la compétition !")
+    st.info("Le tableau est vide.")
